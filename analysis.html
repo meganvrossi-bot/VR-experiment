@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Psychometric Analysis</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e8e8f0; font-family: 'Courier New', monospace; padding: 2rem; min-height: 100vh; }
+  h1 { font-size: 1.2rem; font-weight: normal; letter-spacing: 0.15em; color: #a0c4ff; margin-bottom: 0.4rem; }
+  .sub { font-size: 0.75rem; color: #555570; letter-spacing: 0.08em; margin-bottom: 2rem; }
+  textarea {
+    width: 100%; height: 140px; background: #12121a;
+    border: 1px solid #2a2a3a; color: #c8f7c5;
+    font-family: 'Courier New', monospace; font-size: 0.72rem;
+    padding: 0.8rem; resize: vertical; outline: none;
+  }
+  textarea:focus { border-color: #a0c4ff44; }
+  .btn {
+    margin-top: 0.8rem; padding: 0.7rem 2rem;
+    background: transparent; border: 1px solid #a0c4ff;
+    color: #a0c4ff; font-family: inherit; font-size: 0.8rem;
+    letter-spacing: 0.1em; cursor: pointer;
+  }
+  .btn:hover { background: #a0c4ff15; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin: 2rem 0; }
+  .card { background: #12121a; border: 1px solid #2a2a3a; padding: 1rem 1.2rem; }
+  .card-label { font-size: 0.65rem; color: #555570; letter-spacing: 0.1em; margin-bottom: 0.4rem; }
+  .card-value { font-size: 1.6rem; color: #a0c4ff; }
+  .card-unit { font-size: 0.7rem; color: #555570; }
+  .chart-wrap { background: #0d0d14; border: 1px solid #1a1a2a; padding: 1.2rem; margin-bottom: 1.5rem; }
+  .chart-title { font-size: 0.7rem; color: #555570; letter-spacing: 0.1em; margin-bottom: 1rem; }
+  canvas { max-height: 280px; }
+  .staircase-wrap { background: #0d0d14; border: 1px solid #1a1a2a; padding: 1.2rem; }
+  #error-msg { color: #ff8888; font-size: 0.75rem; margin-top: 0.5rem; display: none; }
+  .interpret { background: #0d1a0d; border: 1px solid #1a3a1a; padding: 1.2rem; margin-top: 1.5rem; }
+  .interpret h3 { font-size: 0.75rem; color: #c8f7c5; letter-spacing: 0.1em; margin-bottom: 0.8rem; }
+  .interpret p { font-size: 0.75rem; color: #8888aa; line-height: 1.8; }
+  .interpret span { color: #c8f7c5; }
+  #output { display: none; }
+</style>
+</head>
+<body>
+
+<h1>PSYCHOMETRIC ANALYSIS</h1>
+<div class="sub">DEPTH JND EXPERIMENT — RESULTS DASHBOARD</div>
+
+<p style="font-size:0.75rem; color:#8888aa; margin-bottom:0.6rem;">Paste your exported CSV data from the experiment below:</p>
+<textarea id="csv-input" placeholder="trial,disparity_m,closer_side,response,correct,rt_ms,reversals_so_far&#10;1,0.4000,left,left,1,842,0&#10;..."></textarea>
+<div id="error-msg"></div>
+<button class="btn" onclick="analyze()">ANALYZE</button>
+
+<div id="output">
+  <div class="cards">
+    <div class="card"><div class="card-label">JND (THRESHOLD)</div><div class="card-value" id="jnd-val">—</div><div class="card-unit">meters</div></div>
+    <div class="card"><div class="card-label">ACCURACY</div><div class="card-value" id="acc-val">—</div><div class="card-unit">percent</div></div>
+    <div class="card"><div class="card-label">TOTAL TRIALS</div><div class="card-value" id="trial-val">—</div><div class="card-unit">responses</div></div>
+    <div class="card"><div class="card-label">MEAN RT</div><div class="card-value" id="rt-val">—</div><div class="card-unit">milliseconds</div></div>
+  </div>
+
+  <div class="chart-wrap">
+    <div class="chart-title">PSYCHOMETRIC CURVE — P(CORRECT) vs DISPARITY</div>
+    <canvas id="psychChart"></canvas>
+  </div>
+
+  <div class="staircase-wrap">
+    <div class="chart-title">STAIRCASE TRACE — DISPARITY OVER TRIALS</div>
+    <canvas id="stairChart"></canvas>
+  </div>
+
+  <div class="interpret">
+    <h3>INTERPRETATION</h3>
+    <p id="interp-text"></p>
+  </div>
+</div>
+
+<script>
+let psychChartInst = null;
+let stairChartInst = null;
+
+function analyze() {
+  const raw = document.getElementById('csv-input').value.trim();
+  const errEl = document.getElementById('error-msg');
+  errEl.style.display = 'none';
+
+  if (!raw) { showErr('Please paste your data above.'); return; }
+
+  const lines = raw.split('\n').filter(l => l && !l.startsWith('#'));
+  if (lines.length < 2) { showErr('Not enough data rows.'); return; }
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const p = lines[i].split(',');
+    if (p.length < 6) continue;
+    rows.push({
+      trial: +p[0], disparity: +p[1], correct: +p[4], rt: +p[5]
+    });
+  }
+  if (rows.length < 5) { showErr('Need at least 5 valid data rows.'); return; }
+
+  // Summary stats
+  const acc = rows.filter(r => r.correct).length / rows.length * 100;
+  const meanRT = rows.reduce((s, r) => s + r.rt, 0) / rows.length;
+
+  // JND: mean of last 4 reversal disparities — parse from summary if present
+  let jnd = null;
+  const summaryMatch = raw.match(/JND:\s*([\d.]+)/);
+  if (summaryMatch) {
+    jnd = +summaryMatch[1];
+  } else {
+    // Estimate as the disparity value at ~75% performance (rough)
+    const sorted = [...rows].sort((a,b) => a.disparity - b.disparity);
+    const mid = sorted[Math.floor(sorted.length / 2)];
+    jnd = mid ? mid.disparity : rows[rows.length-1].disparity;
+  }
+
+  document.getElementById('jnd-val').textContent = jnd.toFixed(3);
+  document.getElementById('acc-val').textContent = acc.toFixed(1);
+  document.getElementById('trial-val').textContent = rows.length;
+  document.getElementById('rt-val').textContent = Math.round(meanRT);
+
+  // Psychometric curve: bin by disparity, compute p(correct)
+  const bins = {};
+  rows.forEach(r => {
+    const key = +r.disparity.toFixed(3);
+    if (!bins[key]) bins[key] = { n: 0, c: 0 };
+    bins[key].n++; bins[key].c += r.correct;
+  });
+  const bKeys = Object.keys(bins).map(Number).sort((a,b)=>a-b);
+  const pCorrect = bKeys.map(k => +(bins[k].c / bins[k].n * 100).toFixed(1));
+
+  // Staircase trace
+  const trialNums = rows.map(r => r.trial);
+  const disparities = rows.map(r => +(r.disparity * 100).toFixed(2));
+
+  buildPsychChart(bKeys.map(k => (k*100).toFixed(1)), pCorrect, +(jnd*100).toFixed(1));
+  buildStairChart(trialNums, disparities);
+
+  // Interpretation
+  const jndCm = (jnd * 100).toFixed(1);
+  document.getElementById('interp-text').innerHTML =
+    `Your measured JND is <span>${jndCm} cm</span> of depth. This means you could reliably detect a depth difference of about <span>${jndCm} cm</span> at ~2.5 m distance. ` +
+    `Your accuracy across all trials was <span>${acc.toFixed(1)}%</span> (chance = 50%). ` +
+    `A lower JND indicates finer depth discrimination — typical human stereo acuity at arm's length is 1–5 cm. ` +
+    `The psychometric curve shows how your hit rate varied with stimulus intensity; the JND corresponds to the 75% correct point on this curve. ` +
+    `VR-specific confounds such as vergence-accommodation conflict may have elevated your threshold compared to natural viewing.`;
+
+  document.getElementById('output').style.display = 'block';
+}
+
+function showErr(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+const chartDefaults = {
+  responsive: true,
+  maintainAspectRatio: true,
+  plugins: { legend: { display: false }, tooltip: { callbacks: {} } },
+  scales: {
+    x: { grid: { color: '#1a1a2a' }, ticks: { color: '#555570', font: { family: 'Courier New', size: 11 } } },
+    y: { grid: { color: '#1a1a2a' }, ticks: { color: '#555570', font: { family: 'Courier New', size: 11 } } }
+  }
+};
+
+function buildPsychChart(labels, data, jndCm) {
+  if (psychChartInst) psychChartInst.destroy();
+  const ctx = document.getElementById('psychChart').getContext('2d');
+  psychChartInst = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'P(correct) %',
+          data,
+          borderColor: '#a0c4ff',
+          backgroundColor: '#a0c4ff18',
+          fill: true,
+          tension: 0.35,
+          pointRadius: 5,
+          pointBackgroundColor: '#a0c4ff',
+          borderWidth: 2
+        },
+        {
+          label: '75% threshold',
+          data: labels.map(() => 75),
+          borderColor: '#c8f7c566',
+          borderDash: [6, 4],
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: false
+        },
+        {
+          label: 'Chance',
+          data: labels.map(() => 50),
+          borderColor: '#ff888844',
+          borderDash: [3, 3],
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      ...chartDefaults,
+      scales: {
+        ...chartDefaults.scales,
+        x: { ...chartDefaults.scales.x, title: { display: true, text: 'Disparity (cm)', color: '#555570', font: { family: 'Courier New', size: 11 } } },
+        y: { ...chartDefaults.scales.y, min: 0, max: 100, title: { display: true, text: 'P(correct) %', color: '#555570', font: { family: 'Courier New', size: 11 } } }
+      }
+    }
+  });
+}
+
+function buildStairChart(labels, data) {
+  if (stairChartInst) stairChartInst.destroy();
+  const ctx = document.getElementById('stairChart').getContext('2d');
+  stairChartInst = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Disparity (cm)',
+        data,
+        borderColor: '#c8f7c5',
+        backgroundColor: 'transparent',
+        tension: 0,
+        pointRadius: 2,
+        pointBackgroundColor: '#c8f7c5',
+        borderWidth: 1.5
+      }]
+    },
+    options: {
+      ...chartDefaults,
+      scales: {
+        ...chartDefaults.scales,
+        x: { ...chartDefaults.scales.x, title: { display: true, text: 'Trial', color: '#555570', font: { family: 'Courier New', size: 11 } } },
+        y: { ...chartDefaults.scales.y, title: { display: true, text: 'Disparity (cm)', color: '#555570', font: { family: 'Courier New', size: 11 } } }
+      }
+    }
+  });
+}
+</script>
+</body>
+</html>
