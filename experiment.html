@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Depth JND Experiment</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+
+  body {
+    background:#06060f;
+    color:#e0e0f0;
+    font-family:'Courier New', monospace;
+    height:100vh;
+    overflow:hidden;
+    user-select:none;
+  }
+
+  /* ── SCREENS ───────────────────────────────────────── */
+  .screen {
+    position:fixed; inset:0;
+    display:flex; flex-direction:column;
+    align-items:center; justify-content:center;
+    padding:2rem; text-align:center;
+  }
+  .screen.hidden { display:none; }
+
+  /* ── SPLASH ────────────────────────────────────────── */
+  #splash { background:#06060f; z-index:10; }
+  #splash h1 {
+    font-size:clamp(1.1rem,3vw,1.6rem);
+    font-weight:400; color:#a0c4ff;
+    letter-spacing:.14em; margin-bottom:1.5rem;
+  }
+  #splash p {
+    font-size:clamp(.8rem,2vw,.95rem);
+    color:#8888aa; line-height:2; max-width:520px; margin-bottom:.3rem;
+  }
+  .hl { color:#c8f7c5; }
+  .big-btn {
+    margin-top:2rem;
+    width:min(320px,80vw);
+    padding:1.1rem 2rem;
+    background:#0a1a3a;
+    border:2px solid #4a90e2;
+    color:#a0c4ff;
+    font-family:inherit;
+    font-size:clamp(.9rem,2.5vw,1.1rem);
+    letter-spacing:.12em;
+    cursor:pointer;
+    border-radius:6px;
+    touch-action:manipulation;
+  }
+  .big-btn:active { background:#1a2a5a; transform:scale(0.98); }
+
+  /* ── TRIAL SCREEN ──────────────────────────────────── */
+  #trial-screen { background:#06060f; z-index:5; flex-direction:column; }
+
+  #trial-hud {
+    position:fixed; top:0; left:0; right:0;
+    display:flex; justify-content:space-between;
+    padding:.7rem 1.4rem;
+    background:rgba(6,6,15,.9);
+    font-size:clamp(.65rem,1.8vw,.8rem);
+    letter-spacing:.07em; color:#445;
+    border-bottom:1px solid #111128;
+    z-index:20;
+  }
+  #trial-hud span { color:#a0c4ff; }
+
+  #arena {
+    flex:1; width:100%;
+    display:flex; align-items:center; justify-content:center;
+    position:relative; padding-top:2.5rem;
+  }
+
+  canvas#trial-canvas {
+    display:block;
+    width:100%; height:100%;
+    position:absolute; inset:0;
+  }
+
+  /* Response buttons — large enough for controller pointer */
+  #response-row {
+    position:fixed; bottom:0; left:0; right:0;
+    display:flex; gap:0;
+    z-index:20;
+  }
+  .resp-btn {
+    flex:1;
+    padding:clamp(1.2rem,4vh,2rem) 1rem;
+    background:#080818;
+    border:none;
+    border-top:2px solid #1a1a3a;
+    color:#a0c4ff;
+    font-family:inherit;
+    font-size:clamp(1rem,3vw,1.3rem);
+    letter-spacing:.1em;
+    cursor:pointer;
+    touch-action:manipulation;
+    transition:background .1s;
+  }
+  .resp-btn:first-child { border-right:1px solid #1a1a3a; }
+  .resp-btn:active, .resp-btn.pressed { background:#0d1d3a; }
+  #resp-L::before { content:"← "; }
+  #resp-R::after  { content:" →"; }
+
+  /* Feedback flash */
+  #feedback {
+    position:fixed;
+    top:50%; left:50%;
+    transform:translate(-50%,-50%);
+    font-size:clamp(2rem,8vw,3.5rem);
+    pointer-events:none;
+    opacity:0;
+    transition:opacity .12s;
+    z-index:30;
+  }
+
+  /* ITI overlay — covers spheres between trials */
+  #iti-cover {
+    position:absolute; inset:0;
+    background:#06060f;
+    display:none;
+    align-items:center; justify-content:center;
+    z-index:10;
+  }
+  #iti-cover.active { display:flex; }
+  #fix-dot {
+    width:10px; height:10px; border-radius:50%;
+    background:#223; border:1px solid #334;
+  }
+
+  /* ── RESULTS ───────────────────────────────────────── */
+  #results { background:#06060f; z-index:10; gap:1rem; padding:1.5rem; }
+  #results h2 {
+    font-size:clamp(1rem,2.5vw,1.3rem);
+    font-weight:400; color:#a0c4ff;
+    letter-spacing:.12em;
+  }
+  .metric-row {
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:.8rem;
+    width:100%; max-width:520px;
+  }
+  .metric {
+    background:#0d0d1e;
+    border:1px solid #1a1a30;
+    border-radius:6px;
+    padding:.8rem 1rem;
+  }
+  .metric-label { font-size:.65rem; color:#445; letter-spacing:.1em; margin-bottom:.3rem; }
+  .metric-val   { font-size:clamp(1.5rem,4vw,2rem); color:#c8f7c5; }
+  .metric-unit  { font-size:.65rem; color:#445; }
+
+  #data-box {
+    background:#0a0a1a; border:1px solid #1a1a30; border-radius:6px;
+    padding:.8rem 1rem; font-size:.65rem; line-height:1.7;
+    max-height:160px; overflow-y:auto;
+    width:100%; max-width:520px;
+    color:#c8f7c5; word-break:break-all;
+  }
+  .copy-btn {
+    width:100%; max-width:520px;
+    padding:.9rem; background:#0a1a3a;
+    border:2px solid #4a90e2; border-radius:6px;
+    color:#a0c4ff; font-family:inherit;
+    font-size:.85rem; letter-spacing:.1em;
+    cursor:pointer; touch-action:manipulation;
+  }
+  .copy-btn:active { background:#1a2a5a; }
+</style>
+</head>
+<body>
+
+<!-- ── SPLASH ──────────────────────────────────────────────── -->
+<div id="splash" class="screen">
+  <h1>DEPTH PERCEPTION EXPERIMENT</h1>
+  <p>Two glowing spheres will appear side by side.</p>
+  <p>One is slightly <span class="hl">closer</span> than the other.</p>
+  <p>Tap <span class="hl">LEFT</span> button if the left sphere looks closer.</p>
+  <p>Tap <span class="hl">RIGHT</span> button if the right sphere looks closer.</p>
+  <p style="margin-top:.8rem;color:#2a2a44;">~40 trials · about 3 minutes</p>
+  <button class="big-btn" id="start-btn">START EXPERIMENT</button>
+</div>
+
+<!-- ── TRIAL ───────────────────────────────────────────────── -->
+<div id="trial-screen" class="screen hidden">
+  <div id="trial-hud">
+    <div>trial <span id="h-trial">1</span> / 40</div>
+    <div>reversals <span id="h-rev">0</span> / 6</div>
+    <div>disparity <span id="h-disp">—</span> m</div>
+  </div>
+
+  <div id="arena">
+    <canvas id="trial-canvas"></canvas>
+    <div id="iti-cover"><div id="fix-dot"></div></div>
+  </div>
+
+  <div id="response-row">
+    <button class="resp-btn" id="resp-L">LEFT</button>
+    <button class="resp-btn" id="resp-R">RIGHT</button>
+  </div>
+
+  <div id="feedback"></div>
+</div>
+
+<!-- ── RESULTS ─────────────────────────────────────────────── -->
+<div id="results" class="screen hidden">
+  <h2>EXPERIMENT COMPLETE</h2>
+  <div class="metric-row">
+    <div class="metric">
+      <div class="metric-label">JND THRESHOLD</div>
+      <div class="metric-val" id="r-jnd">—</div>
+      <div class="metric-unit">cm depth</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">ACCURACY</div>
+      <div class="metric-val" id="r-acc">—</div>
+      <div class="metric-unit">percent</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">TRIALS</div>
+      <div class="metric-val" id="r-trials">—</div>
+      <div class="metric-unit">responses</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">MEAN RT</div>
+      <div class="metric-val" id="r-rt">—</div>
+      <div class="metric-unit">ms</div>
+    </div>
+  </div>
+  <p style="color:#445;font-size:.72rem;max-width:520px;line-height:1.8;">
+    Copy the data below and paste it into<br>
+    <span style="color:#a0c4ff">meganvrossi-bot.github.io/VR-experiment/analysis.html</span>
+  </p>
+  <div id="data-box"></div>
+  <button class="copy-btn" id="copy-btn">COPY DATA</button>
+</div>
+
+<script>
+// ── Parameters ────────────────────────────────────────────────
+const TOTAL     = 40;
+const REV_CRIT  = 6;
+const INIT_D    = 0.4;
+const STEP_L    = 0.08;
+const STEP_S    = 0.02;
+const SWITCH_R  = 2;
+const MIN_D     = 0.005;
+const MAX_D     = 0.8;
+const ITI_MS    = 800;
+
+// ── State ─────────────────────────────────────────────────────
+let state    = 'idle';
+let trials   = [];
+let trialNum = 0;
+let disp     = INIT_D;
+let revs     = 0;
+let revDisps = [];
+let lastDir  = null;
+let tStart   = 0;
+let closer   = 'left';
+let locked   = false;
+
+// ── Staircase ─────────────────────────────────────────────────
+function staircase(correct) {
+  const step = revs < SWITCH_R ? STEP_L : STEP_S;
+  const nd   = correct ? 'down' : 'up';
+  disp = correct
+    ? Math.max(MIN_D, disp - step)
+    : Math.min(MAX_D, disp + step);
+  if (lastDir && nd !== lastDir) { revs++; revDisps.push(disp); }
+  lastDir = nd;
+}
+
+function computeJND() {
+  const u = revDisps.slice(-4);
+  return u.length ? u.reduce((a,b) => a+b, 0) / u.length : disp;
+}
+
+// ── Trial flow ────────────────────────────────────────────────
+function newTrial() {
+  locked  = false;
+  closer  = Math.random() < 0.5 ? 'left' : 'right';
+  tStart  = performance.now();
+  state   = 'trial';
+  document.getElementById('iti-cover').classList.remove('active');
+  updateHUD();
+  drawSpheres();
+}
+
+function respond(side) {
+  if (state !== 'trial' || locked) return;
+  locked = true;
+
+  const rt      = Math.round(performance.now() - tStart);
+  const correct = side === closer;
+
+  trials.push({
+    trial:          trialNum + 1,
+    disparity:      +disp.toFixed(4),
+    closer_side:    closer,
+    response:       side,
+    correct:        correct ? 1 : 0,
+    rt_ms:          rt,
+    reversals_so_far: revs
+  });
+
+  staircase(correct);
+  trialNum++;
+  state = 'iti';
+
+  // Show feedback
+  const fb = document.getElementById('feedback');
+  fb.textContent = correct ? '✓' : '✗';
+  fb.style.color = correct ? '#c8f7c5' : '#ff8888';
+  fb.style.opacity = '1';
+  setTimeout(() => fb.style.opacity = '0', 500);
+
+  // Cover spheres during ITI
+  document.getElementById('iti-cover').classList.add('active');
+
+  setTimeout(() => {
+    if (trialNum >= TOTAL || revs >= REV_CRIT) finish();
+    else newTrial();
+  }, ITI_MS);
+}
+
+function updateHUD() {
+  document.getElementById('h-trial').textContent = trialNum + 1;
+  document.getElementById('h-rev').textContent   = revs;
+  document.getElementById('h-disp').textContent  = disp.toFixed(3);
+}
+
+// ── Canvas drawing ────────────────────────────────────────────
+function drawSpheres() {
+  const c   = document.getElementById('trial-canvas');
+  const arena = document.getElementById('arena');
+  c.width   = arena.clientWidth;
+  c.height  = arena.clientHeight;
+  const ctx = c.getContext('2d');
+
+  ctx.fillStyle = '#06060f';
+  ctx.fillRect(0, 0, c.width, c.height);
+
+  const cx    = c.width / 2;
+  const cy    = c.height / 2 - 20;
+  const base  = Math.min(c.width, c.height) * 0.11;
+  const extra = disp * 65;
+  const lR    = closer === 'left'  ? base + extra : base;
+  const rR    = closer === 'right' ? base + extra : base;
+  const sep   = Math.min(c.width * 0.24, 160);
+
+  function sphere(x, y, r, active) {
+    // Main body
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = active ? '#1a3565' : '#141430';
+    ctx.fill();
+    // Border
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.strokeStyle = active ? '#4a90e2' : '#2a2a55';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    // Highlight
+    ctx.beginPath();
+    ctx.arc(x - r * 0.28, y - r * 0.28, r * 0.28, 0, Math.PI * 2);
+    ctx.fillStyle = active ? 'rgba(160,200,255,0.28)' : 'rgba(100,100,200,0.1)';
+    ctx.fill();
+  }
+
+  sphere(cx - sep, cy, lR, true);
+  sphere(cx + sep, cy, rR, true);
+
+  // Labels
+  ctx.fillStyle   = '#667799';
+  ctx.font        = `${Math.round(c.height * 0.045)}px 'Courier New'`;
+  ctx.textAlign   = 'center';
+  ctx.fillText('L', cx - sep, cy + lR + c.height * 0.09);
+  ctx.fillText('R', cx + sep, cy + rR + c.height * 0.09);
+
+  // Fixation dot
+  ctx.beginPath();
+  ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff18';
+  ctx.fill();
+}
+
+// ── Start ─────────────────────────────────────────────────────
+function startExperiment() {
+  document.getElementById('splash').classList.add('hidden');
+  document.getElementById('trial-screen').classList.remove('hidden');
+  window.addEventListener('resize', () => {
+    if (state === 'trial') drawSpheres();
+  });
+  newTrial();
+}
+
+document.getElementById('start-btn').addEventListener('click', startExperiment);
+document.getElementById('resp-L').addEventListener('click', () => respond('left'));
+document.getElementById('resp-R').addEventListener('click', () => respond('right'));
+
+// Keyboard support (desktop testing)
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft')  respond('left');
+  if (e.key === 'ArrowRight') respond('right');
+});
+
+// ── Finish ────────────────────────────────────────────────────
+function finish() {
+  state = 'done';
+  document.getElementById('trial-screen').classList.add('hidden');
+
+  const jnd    = computeJND();
+  const acc    = +(trials.filter(t => t.correct).length / trials.length * 100).toFixed(1);
+  const meanRT = Math.round(trials.reduce((s,t) => s + t.rt_ms, 0) / trials.length);
+
+  document.getElementById('r-jnd').textContent    = (jnd * 100).toFixed(1);
+  document.getElementById('r-acc').textContent    = acc.toFixed(1);
+  document.getElementById('r-trials').textContent = trials.length;
+  document.getElementById('r-rt').textContent     = meanRT;
+
+  const csv =
+    'trial,disparity_m,closer_side,response,correct,rt_ms,reversals_so_far\n'
+    + trials.map(t =>
+        `${t.trial},${t.disparity},${t.closer_side},${t.response},${t.correct},${t.rt_ms},${t.reversals_so_far}`
+      ).join('\n')
+    + `\n# SUMMARY\n# JND: ${jnd.toFixed(4)} m | Accuracy: ${acc}% | Reversals: ${revs}`;
+
+  window._exportData = csv;
+  document.getElementById('data-box').textContent = csv;
+  document.getElementById('results').classList.remove('hidden');
+}
+
+// ── Copy data ─────────────────────────────────────────────────
+document.getElementById('copy-btn').addEventListener('click', () => {
+  navigator.clipboard.writeText(window._exportData)
+    .then(() => {
+      document.getElementById('copy-btn').textContent = 'COPIED ✓';
+      setTimeout(() => document.getElementById('copy-btn').textContent = 'COPY DATA', 2000);
+    })
+    .catch(() => {
+      const b = document.getElementById('data-box');
+      const r = document.createRange();
+      r.selectNode(b);
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(r);
+      document.getElementById('copy-btn').textContent = 'TEXT SELECTED — COPY MANUALLY';
+    });
+});
+</script>
+</body>
+</html>
