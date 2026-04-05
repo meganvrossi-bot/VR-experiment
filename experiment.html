@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Depth JND Experiment</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e8e8f0; font-family: 'Courier New', monospace; overflow: hidden; }
+  #overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: #0a0a0f;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 2rem; text-align: center;
+  }
+  #overlay h1 { font-size: 1.6rem; font-weight: normal; letter-spacing: 0.15em; color: #a0c4ff; margin-bottom: 1.5rem; }
+  #overlay p { font-size: 0.85rem; color: #8888aa; line-height: 1.8; max-width: 480px; margin-bottom: 0.5rem; }
+  .highlight { color: #c8f7c5; }
+  .btn {
+    margin-top: 2rem; padding: 0.9rem 2.4rem;
+    background: transparent; border: 1px solid #a0c4ff;
+    color: #a0c4ff; font-family: inherit; font-size: 0.9rem;
+    letter-spacing: 0.1em; cursor: pointer; transition: all 0.2s;
+  }
+  .btn:hover { background: #a0c4ff22; }
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: none; justify-content: space-between; align-items: center;
+    padding: 1rem 1.5rem; z-index: 50;
+    background: rgba(10,10,15,0.6);
+    font-size: 0.75rem; letter-spacing: 0.08em; color: #8888aa;
+  }
+  #hud span { color: #a0c4ff; }
+  #feedback {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 1.2rem; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 60;
+  }
+  #results-screen {
+    position: fixed; inset: 0; z-index: 200;
+    background: #0a0a0f;
+    display: none; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 2rem;
+  }
+  #results-screen h2 { font-size: 1.3rem; font-weight: normal; letter-spacing: 0.15em; color: #a0c4ff; margin-bottom: 2rem; }
+  #data-box {
+    background: #12121a; border: 1px solid #2a2a3a;
+    padding: 1rem 1.5rem; font-size: 0.7rem; line-height: 1.6;
+    max-height: 300px; overflow-y: auto; width: 100%; max-width: 600px;
+    color: #c8f7c5; word-break: break-all;
+  }
+  #copy-btn { margin-top: 1rem; }
+  canvas { display: block; }
+  #key-hint { margin-top: 1.5rem; font-size: 0.72rem; color: #555570; line-height: 1.9; display: none; }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>DEPTH PERCEPTION EXPERIMENT</h1>
+  <p>You will see <span class="highlight">two glowing spheres</span> floating in front of you.</p>
+  <p>One sphere is slightly <span class="highlight">closer</span> to you than the other.</p>
+  <p>Press the <span class="highlight">LEFT trigger</span> if the LEFT sphere looks closer.</p>
+  <p>Press the <span class="highlight">RIGHT trigger</span> if the RIGHT sphere looks closer.</p>
+  <p style="margin-top:1rem;color:#555570;">Respond quickly — go with your first instinct. ~40 trials · about 3 minutes</p>
+  <button class="btn" onclick="startXR()">ENTER VR</button>
+  <button class="btn" onclick="startDesktop()" style="margin-top:0.5rem;border-color:#555570;color:#555570;font-size:0.75rem;padding:0.6rem 1.5rem;">test on screen (no headset)</button>
+  <div id="key-hint"><span class="highlight">← Left Arrow</span> = left sphere closer &nbsp;|&nbsp; <span class="highlight">→ Right Arrow</span> = right sphere closer</div>
+</div>
+
+<div id="hud">
+  <div>TRIAL <span id="hud-trial">1</span> / 40</div>
+  <div>REVERSALS <span id="hud-rev">0</span> / 6</div>
+  <div>DISPARITY <span id="hud-disp">—</span> m</div>
+</div>
+<div id="feedback"></div>
+<canvas id="c"></canvas>
+
+<div id="results-screen">
+  <h2>EXPERIMENT COMPLETE</h2>
+  <p style="color:#8888aa;font-size:0.8rem;margin-bottom:1rem;">Copy the data below and paste it into the Analysis tool.</p>
+  <div id="data-box"></div>
+  <button class="btn" id="copy-btn" onclick="copyData()">COPY DATA</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ── Parameters ─────────────────────────────────────────────────────────
+const TOTAL_TRIALS = 40;
+const REVERSAL_CRITERION = 6;
+const INITIAL_DISPARITY = 0.4;
+const STEP_LARGE = 0.08;
+const STEP_SMALL = 0.02;
+const STEP_SWITCH_REVERSAL = 2;
+const MIN_DISPARITY = 0.005;
+const MAX_DISPARITY = 0.8;
+const ITI_MS = 900;
+
+// ── State ──────────────────────────────────────────────────────────────
+let state = 'idle';
+let trials = [];
+let currentTrial = 0;
+let currentDisparity = INITIAL_DISPARITY;
+let reversals = 0;
+let reversalDisparities = [];
+let lastDirection = null;
+let trialStartTime = 0;
+let closerSide = 'left';
+let xrSession = null;
+let xrRefSpace = null;
+let xrRenderer = null;
+let xrMode = false;
+let introStartTime = 0;
+
+// ── Staircase ──────────────────────────────────────────────────────────
+function updateStaircase(correct) {
+  const step = reversals < STEP_SWITCH_REVERSAL ? STEP_LARGE : STEP_SMALL;
+  const newDir = correct ? 'down' : 'up';
+  currentDisparity = correct
+    ? Math.max(MIN_DISPARITY, currentDisparity - step)
+    : Math.min(MAX_DISPARITY, currentDisparity + step);
+  if (lastDirection !== null && newDir !== lastDirection) {
+    reversals++;
+    reversalDisparities.push(currentDisparity);
+  }
+  lastDirection = newDir;
+}
+
+function computeJND() {
+  const usable = reversalDisparities.slice(-4);
+  return usable.length ? usable.reduce((a,b)=>a+b,0)/usable.length : currentDisparity;
+}
+
+// ── Trial flow ─────────────────────────────────────────────────────────
+function newTrial() {
+  closerSide = Math.random() < 0.5 ? 'left' : 'right';
+  trialStartTime = performance.now();
+  state = 'trial';
+  updateHUD();
+  if (!xrMode) draw2D();
+}
+
+function handleResponse(side) {
+  if (state !== 'trial') return;
+  const rt = Math.round(performance.now() - trialStartTime);
+  const correct = side === closerSide;
+  trials.push({
+    trial: currentTrial + 1,
+    disparity: +currentDisparity.toFixed(4),
+    closer_side: closerSide,
+    response: side,
+    correct: correct ? 1 : 0,
+    rt_ms: rt,
+    reversals_so_far: reversals
+  });
+  updateStaircase(correct);
+  currentTrial++;
+  state = 'iti';
+  if (!xrMode) {
+    showFeedback2D(correct);
+    draw2D(); // clears spheres during ITI
+  }
+  setTimeout(() => {
+    if (currentTrial >= TOTAL_TRIALS || reversals >= REVERSAL_CRITERION) {
+      finishExperiment();
+    } else {
+      newTrial();
+    }
+  }, ITI_MS);
+}
+
+function showFeedback2D(correct) {
+  const el = document.getElementById('feedback');
+  el.textContent = correct ? '✓' : '✗';
+  el.style.color = correct ? '#c8f7c5' : '#ff8888';
+  el.style.opacity = '1';
+  setTimeout(() => { el.style.opacity = '0'; }, 500);
+}
+
+function updateHUD() {
+  document.getElementById('hud-trial').textContent = currentTrial + 1;
+  document.getElementById('hud-rev').textContent = reversals;
+  document.getElementById('hud-disp').textContent = currentDisparity.toFixed(3);
+}
+
+// ── 2D desktop renderer ────────────────────────────────────────────────
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+
+function draw2D() {
+  resize();
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#0a0a0f';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  if (state !== 'trial') return; // blank during ITI
+
+  const cx = canvas.width/2, cy = canvas.height/2;
+  const baseR = Math.min(canvas.width,canvas.height)*0.09;
+  const extra = currentDisparity * 55;
+  const lR = closerSide==='left'  ? baseR+extra : baseR;
+  const rR = closerSide==='right' ? baseR+extra : baseR;
+  const sep = canvas.width*0.22;
+
+  function sphere(x,y,r) {
+    const g = ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
+    g.addColorStop(0,'#d0eeff'); g.addColorStop(0.4,'#5a9fff'); g.addColorStop(1,'#0a1a3a');
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle = g; ctx.fill();
+  }
+  sphere(cx-sep, cy, lR);
+  sphere(cx+sep, cy, rR);
+
+  ctx.fillStyle='#8888aa';
+  ctx.font=`${Math.round(canvas.height*0.024)}px 'Courier New'`;
+  ctx.textAlign='center';
+  ctx.fillText('← LEFT',  cx-sep, cy+lR+canvas.height*0.07);
+  ctx.fillText('RIGHT →', cx+sep, cy+rR+canvas.height*0.07);
+
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,Math.PI*2);
+  ctx.fillStyle='#ffffff33'; ctx.fill();
+}
+
+function startDesktop() {
+  document.getElementById('overlay').style.display='none';
+  document.getElementById('hud').style.display='flex';
+  document.getElementById('key-hint').style.display='block';
+  window.addEventListener('keydown', e=>{
+    if(e.key==='ArrowLeft')  handleResponse('left');
+    if(e.key==='ArrowRight') handleResponse('right');
+  });
+  window.addEventListener('resize', ()=>{ if(state==='trial'||state==='iti') draw2D(); });
+  resize(); newTrial();
+}
+
+// ── WebXR mode ─────────────────────────────────────────────────────────
+async function startXR() {
+  if (!navigator.xr) {
+    alert('WebXR not available. Please open this page in Meta Browser on your Quest, or use the "test on screen" button.');
+    return;
+  }
+  const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(()=>false);
+  if (!ok) {
+    alert('Immersive VR not supported on this device. Try Meta Browser on the Quest.');
+    return;
+  }
+  try {
+    xrSession = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor','bounded-floor']
+    });
+  } catch(e) {
+    alert('Could not start VR: ' + e.message);
+    return;
+  }
+
+  xrMode = true;
+  // Hide all 2D UI
+  ['overlay','hud','feedback'].forEach(id => {
+    document.getElementById(id).style.display = 'none';
+  });
+
+  const gl = canvas.getContext('webgl', {xrCompatible: true});
+  await gl.makeXRCompatible();
+  xrSession.updateRenderState({ baseLayer: new XRWebGLLayer(xrSession, gl) });
+
+  try {
+    xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+  } catch {
+    xrRefSpace = await xrSession.requestReferenceSpace('viewer');
+  }
+
+  // ── Trigger input — fires on ANY controller trigger press ──────────
+  xrSession.addEventListener('selectstart', evt => {
+    if (state !== 'trial') return;
+    const h = evt.inputSource.handedness;
+    if (h === 'left' || h === 'right') {
+      handleResponse(h);
+    } else {
+      // handedness unknown — fall back to source index
+      const srcs = Array.from(xrSession.inputSources);
+      const idx = srcs.indexOf(evt.inputSource);
+      handleResponse(idx <= 0 ? 'left' : 'right');
+    }
+  });
+
+  xrSession.addEventListener('end', () => {
+    xrSession = null;
+    if (state !== 'done') finishExperiment();
+  });
+
+  xrRenderer = new XRRenderer(gl, xrSession);
+  state = 'intro';
+  introStartTime = performance.now();
+  xrSession.requestAnimationFrame(onXRFrame);
+}
+
+function onXRFrame(t, frame) {
+  if (!xrSession) return;
+  xrSession.requestAnimationFrame(onXRFrame);
+  const pose = frame.getViewerPose(xrRefSpace);
+  if (!pose) return;
+
+  // Auto-advance intro after 5s
+  if (state === 'intro' && (t - introStartTime) > 5000) {
+    newTrial();
+  }
+
+  xrRenderer.render(pose, state, closerSide, currentDisparity, currentTrial, reversals);
+}
+
+// ── WebGL XR Renderer ──────────────────────────────────────────────────
+class XRRenderer {
+  constructor(gl, session) {
+    this.gl = gl;
+    this.session = session;
+    this.texCache = {};
+    this._buildSphereShader();
+    this._buildTexShader();
+    this._buildSphereGeo();
+    this._buildQuadGeo();
+  }
+
+  _buildSphereShader() {
+    const gl = this.gl;
+    const vs = `attribute vec3 p;uniform mat4 mvp;varying vec3 n;void main(){n=p;gl_Position=mvp*vec4(p,1);}`;
+    const fs = `precision mediump float;varying vec3 n;uniform vec3 col;
+      void main(){vec3 l=normalize(vec3(1,2,1));float d=max(dot(normalize(n),l),0.0);gl_FragColor=vec4(col*(0.25+0.75*d),1);}`;
+    this.sProg = this._link(vs,fs);
+    this.sP=gl.getAttribLocation(this.sProg,'p');
+    this.sMVP=gl.getUniformLocation(this.sProg,'mvp');
+    this.sCol=gl.getUniformLocation(this.sProg,'col');
+  }
+
+  _buildTexShader() {
+    const gl = this.gl;
+    const vs = `attribute vec3 p;uniform mat4 mvp;varying vec2 uv;void main(){uv=p.xy*.5+.5;gl_Position=mvp*vec4(p,1);}`;
+    const fs = `precision mediump float;uniform sampler2D tex;varying vec2 uv;
+      void main(){vec4 c=texture2D(tex,vec2(uv.x,1.-uv.y));if(c.a<.05)discard;gl_FragColor=c;}`;
+    this.tProg = this._link(vs,fs);
+    this.tP=gl.getAttribLocation(this.tProg,'p');
+    this.tMVP=gl.getUniformLocation(this.tProg,'mvp');
+    this.tTex=gl.getUniformLocation(this.tProg,'tex');
+  }
+
+  _link(vs,fs) {
+    const gl=this.gl;
+    const c=t=>{const s=gl.createShader(t);gl.shaderSource(s,vs.length>fs.length?vs:fs);return s;};
+    // actually compile properly:
+    const cs=(type,src)=>{const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);return s;};
+    const p=gl.createProgram();
+    gl.attachShader(p,cs(gl.VERTEX_SHADER,vs));
+    gl.attachShader(p,cs(gl.FRAGMENT_SHADER,fs));
+    gl.linkProgram(p);
+    return p;
+  }
+
+  _buildSphereGeo() {
+    const gl=this.gl, verts=[], idx=[], st=20, sl=20;
+    for(let i=0;i<=st;i++){const phi=Math.PI*i/st;
+      for(let j=0;j<=sl;j++){const th=2*Math.PI*j/sl;
+        verts.push(Math.sin(phi)*Math.cos(th),Math.cos(phi),Math.sin(phi)*Math.sin(th));}}
+    for(let i=0;i<st;i++)for(let j=0;j<sl;j++){
+      const a=i*(sl+1)+j,b=a+sl+1;idx.push(a,b,a+1,b,b+1,a+1);}
+    this.sVBO=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this.sVBO);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(verts),gl.STATIC_DRAW);
+    this.sIBO=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,this.sIBO);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(idx),gl.STATIC_DRAW);
+    this.sIdxCount=idx.length;
+  }
+
+  _buildQuadGeo() {
+    const gl=this.gl;
+    this.qVBO=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this.qVBO);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,0,1,-1,0,1,1,0,-1,1,0]),gl.STATIC_DRAW);
+    this.qIBO=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,this.qIBO);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array([0,1,2,0,2,3]),gl.STATIC_DRAW);
+  }
+
+  _mul(a,b){const o=new Float32Array(16);for(let i=0;i<4;i++)for(let j=0;j<4;j++)for(let k=0;k<4;k++)o[i*4+j]+=a[i*4+k]*b[k*4+j];return o;}
+  _T(x,y,z){return new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1]);}
+  _S(x,y,z){return new Float32Array([x,0,0,0,0,y,0,0,0,0,z,0,0,0,0,1]);}
+
+  sphere(vp,x,y,z,r,cr,cg,cb){
+    const gl=this.gl;
+    gl.useProgram(this.sProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER,this.sVBO);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,this.sIBO);
+    gl.enableVertexAttribArray(this.sP);gl.vertexAttribPointer(this.sP,3,gl.FLOAT,false,0,0);
+    gl.uniformMatrix4fv(this.sMVP,false,this._mul(vp,this._mul(this._T(x,y,z),this._S(r,r,r))));
+    gl.uniform3f(this.sCol,cr,cg,cb);
+    gl.drawElements(gl.TRIANGLES,this.sIdxCount,gl.UNSIGNED_SHORT,0);
+  }
+
+  _makeTex(lines,w=512,h=256,fs=26){
+    const gl=this.gl;
+    const oc=document.createElement('canvas');oc.width=w;oc.height=h;
+    const c=oc.getContext('2d');
+    c.fillStyle='rgba(4,4,18,0.93)';
+    c.beginPath();c.roundRect(3,3,w-6,h-6,14);c.fill();
+    c.strokeStyle='#4a90e2';c.lineWidth=2.5;
+    c.beginPath();c.roundRect(3,3,w-6,h-6,14);c.stroke();
+    const lh=h/(lines.length+1);
+    lines.forEach((ln,i)=>{
+      const hdr=ln.startsWith('##');
+      const txt=hdr?ln.slice(2).trim():ln;
+      c.font=`${hdr?'bold ':''}${hdr?fs+4:fs}px 'Courier New',monospace`;
+      c.fillStyle=hdr?'#a0c4ff':'#d8d8f0';
+      c.textAlign='center';
+      c.fillText(txt,w/2,lh*(i+1)+fs*.4);
+    });
+    const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,oc);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    return t;
+  }
+
+  tex(vp,x,y,z,w,h,texture){
+    const gl=this.gl;
+    gl.useProgram(this.tProg);
+    gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+    gl.bindBuffer(gl.ARRAY_BUFFER,this.qVBO);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,this.qIBO);
+    gl.enableVertexAttribArray(this.tP);gl.vertexAttribPointer(this.tP,3,gl.FLOAT,false,0,0);
+    gl.uniformMatrix4fv(this.tMVP,false,this._mul(vp,this._mul(this._T(x,y,z),this._S(w/2,h/2,1))));
+    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.uniform1i(this.tTex,0);
+    gl.drawElements(gl.TRIANGLES,6,gl.UNSIGNED_SHORT,0);
+    gl.disable(gl.BLEND);
+  }
+
+  gt(key,lines,w,h,fs){
+    if(!this.texCache[key]) this.texCache[key]=this._makeTex(lines,w,h,fs);
+    return this.texCache[key];
+  }
+
+  render(pose, state, closerSide, disparity, trialNum, revCount) {
+    const gl=this.gl;
+    const layer=this.session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER,layer.framebuffer);
+
+    for(const view of pose.views){
+      const vp=layer.getViewport(view);
+      gl.viewport(vp.x,vp.y,vp.width,vp.height);
+      gl.clearColor(.02,.02,.06,1);
+      gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+      gl.enable(gl.DEPTH_TEST);
+
+      const vpM=this._mul(view.projectionMatrix,view.transform.inverse.matrix);
+
+      if(state==='intro'){
+        const t=this.gt('intro',[
+          '## DEPTH PERCEPTION EXPERIMENT',
+          'Two blue spheres will appear.',
+          '',
+          'LEFT trigger  =  left sphere is closer',
+          'RIGHT trigger  =  right sphere is closer',
+          '',
+          'Starting in 5 seconds...'
+        ],620,300,24);
+        this.tex(vpM,0,.05,-2.5,1.5,.73,t);
+
+      } else if(state==='trial'){
+        const bZ=-2.5, half=disparity/2;
+        const lZ=closerSide==='left' ? bZ+half : bZ-half;
+        const rZ=closerSide==='right'? bZ+half : bZ-half;
+        this.sphere(vpM,-0.38,0,lZ, 0.13, 0.3,0.6,1.0);
+        this.sphere(vpM, 0.38,0,rZ, 0.13, 0.3,0.6,1.0);
+
+        // L / R labels
+        this.tex(vpM,-0.38,-0.24,-2.5,.18,.1, this.gt('lbl_L',['L'],80,40,22));
+        this.tex(vpM, 0.38,-0.24,-2.5,.18,.1, this.gt('lbl_R',['R'],80,40,22));
+
+        // Fixation
+        this.sphere(vpM,0,0,-2.5,.008,1,1,1);
+
+        // HUD panel — cache per trial+reversal combo
+        const hudKey=`hud_${trialNum}_${revCount}`;
+        const hudTex=this.gt(hudKey,[`Trial ${trialNum+1} / 40          Reversals: ${revCount} / 6`],500,72,22);
+        this.tex(vpM,0,.5,-2.5,1.1,.16,hudTex);
+
+      } else if(state==='iti'){
+        // Blank — just dim fixation dot so user knows it's working
+        this.sphere(vpM,0,0,-2.5,.008,.4,.4,.4);
+
+      } else if(state==='done'){
+        const t=this.gt('done',[
+          '## COMPLETE',
+          'Remove the headset.',
+          'Your results are on screen.'
+        ],460,180,26);
+        this.tex(vpM,0,.05,-2.5,1.1,.43,t);
+      }
+    }
+  }
+}
+
+// ── Finish ─────────────────────────────────────────────────────────────
+function finishExperiment(){
+  state='done';
+  if(xrSession){xrSession.end();xrSession=null;}
+  document.getElementById('hud').style.display='none';
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  const jnd=computeJND();
+  const acc=+(trials.filter(t=>t.correct).length/trials.length*100).toFixed(1);
+  const csv='trial,disparity_m,closer_side,response,correct,rt_ms,reversals_so_far\n'
+    +trials.map(t=>`${t.trial},${t.disparity},${t.closer_side},${t.response},${t.correct},${t.rt_ms},${t.reversals_so_far}`).join('\n')
+    +`\n# SUMMARY\n# JND: ${jnd.toFixed(4)} m | Accuracy: ${acc}% | Reversals: ${reversals}`;
+
+  window._exportData=csv;
+  document.getElementById('data-box').textContent=csv;
+  document.getElementById('results-screen').style.display='flex';
+}
+
+function copyData(){
+  navigator.clipboard.writeText(window._exportData)
+    .then(()=>{
+      document.getElementById('copy-btn').textContent='COPIED ✓';
+      setTimeout(()=>{document.getElementById('copy-btn').textContent='COPY DATA';},2000);
+    })
+    .catch(()=>{
+      const b=document.getElementById('data-box');
+      const r=document.createRange();r.selectNode(b);
+      window.getSelection().removeAllRanges();window.getSelection().addRange(r);
+      document.getElementById('copy-btn').textContent='TEXT SELECTED — COPY MANUALLY';
+    });
+}
+
+resize();
+</script>
+</body>
+</html>
